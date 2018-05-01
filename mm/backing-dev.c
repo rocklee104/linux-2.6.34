@@ -40,7 +40,9 @@ static struct class *bdi_class;
  * locking.
  */
 DEFINE_SPINLOCK(bdi_lock);
+/* 活动bdi链表头,成员是每个bdi的bdi_list.链表中的bdi可能是正在运行的回写线程,也可能是回写线程已经完成 */
 LIST_HEAD(bdi_list);
+/* 待处理的bdi,这个链表中的bdi一定没有回写线程正在运行 */
 LIST_HEAD(bdi_pending_list);
 
 static struct task_struct *sync_supers_tsk;
@@ -291,6 +293,7 @@ static void bdi_task_init(struct backing_dev_info *bdi,
 	set_user_nice(tsk, 0);
 }
 
+/* flusher线程执行函数,函数进入时,这个bdi不处于任何链表 */
 static int bdi_start_fn(void *ptr)
 {
 	struct bdi_writeback *wb = ptr;
@@ -301,9 +304,15 @@ static int bdi_start_fn(void *ptr)
 	 * Add us to the active bdi_list
 	 */
 	spin_lock_bh(&bdi_lock);
+	/*
+	 * 放入活动链表的原因:
+	 * 1. 一旦冲刷任务完成,在forker线程中就会帮其创建flusher线程.
+	 * 2. 冲刷任务还在执行,forker线程扫描活动bdi,就会跳过这个bdi
+	 */
 	list_add_rcu(&bdi->bdi_list, &bdi_list);
 	spin_unlock_bh(&bdi_lock);
 
+	/* 将wb加入bdi->wb_list */
 	bdi_task_init(bdi, wb);
 
 	/*
@@ -329,6 +338,7 @@ static int bdi_start_fn(void *ptr)
 	if (!list_empty(&bdi->work_list))
 		wb_do_writeback(wb, 1);
 
+	/* 下次forker线程需要为其创建flusher线程 */
 	wb->task = NULL;
 	return ret;
 }
@@ -390,6 +400,7 @@ static void sync_supers_timer_fn(unsigned long unused)
 
 static int bdi_forker_task(void *ptr)
 {
+	/* 获取当前bdi默认的wb */
 	struct bdi_writeback *me = ptr;
 
 	bdi_task_init(me->bdi, me);
@@ -402,6 +413,7 @@ static int bdi_forker_task(void *ptr)
 		 * Temporary measure, we want to make sure we don't see
 		 * dirty data on the default backing_dev_info
 		 */
+		/* 首先查看当前wb上有没有需要回写的inode或者当前bdi上是否有需要处理的work */
 		if (wb_has_dirty_io(me) || !list_empty(&me->bdi->work_list))
 			wb_do_writeback(me, 0);
 
@@ -411,6 +423,7 @@ static int bdi_forker_task(void *ptr)
 		 * Check if any existing bdi's have dirty data without
 		 * a thread registered. If so, set that up.
 		 */
+		/* 遍历bdi_list上所有的bdi */
 		list_for_each_entry_safe(bdi, tmp, &bdi_list, bdi_list) {
 			if (bdi->wb.task)
 				continue;
@@ -418,16 +431,20 @@ static int bdi_forker_task(void *ptr)
 			    !bdi_has_dirty_io(bdi))
 				continue;
 
+			/* 当一个bdi有需要处理的wrok,但是没有对应的flush线程,就将这个bdi加到pending list上 */
 			bdi_add_default_flusher_task(bdi);
 		}
 
 		set_current_state(TASK_INTERRUPTIBLE);
 
+		/* 如果pending list是空的 */
 		if (list_empty(&bdi_pending_list)) {
 			unsigned long wait;
 
 			spin_unlock_bh(&bdi_lock);
+			/* 等待50s */
 			wait = msecs_to_jiffies(dirty_writeback_interval * 10);
+			/* 如果有bdi被加到pending list上,就会被唤醒. */
 			schedule_timeout(wait);
 			try_to_freeze();
 			continue;
@@ -441,9 +458,11 @@ static int bdi_forker_task(void *ptr)
 		 */
 		bdi = list_entry(bdi_pending_list.next, struct backing_dev_info,
 				 bdi_list);
+		/* 从pending list上取下 */
 		list_del_init(&bdi->bdi_list);
 		spin_unlock_bh(&bdi_lock);
 
+		/* 从pending list上获取bdi,然后创建对应的flush线程到其默认的wb上 */
 		wb = &bdi->wb;
 		wb->task = kthread_run(bdi_start_fn, wb, "flush-%s",
 					dev_name(bdi->dev));
@@ -462,9 +481,11 @@ static int bdi_forker_task(void *ptr)
 			 * memory.
 			 */
 			spin_lock_bh(&bdi_lock);
+			/* 如果flush线程创建失败,将当前bdi插入到pending list尾部,下次依然有创建flush线程的机会 */
 			list_add_tail(&bdi->bdi_list, &bdi_pending_list);
 			spin_unlock_bh(&bdi_lock);
 
+			/* 如果flush线程创建失败,forker线程负责回写一部分数据 */
 			bdi_flush_io(bdi);
 		}
 	}
@@ -472,6 +493,7 @@ static int bdi_forker_task(void *ptr)
 	return 0;
 }
 
+/* 将bdi加入pending list */
 static void bdi_add_to_pending(struct rcu_head *head)
 {
 	struct backing_dev_info *bdi;
@@ -480,6 +502,7 @@ static void bdi_add_to_pending(struct rcu_head *head)
 	INIT_LIST_HEAD(&bdi->bdi_list);
 
 	spin_lock(&bdi_lock);
+	/* 将当前bdi加入到pending list上 */
 	list_add_tail(&bdi->bdi_list, &bdi_pending_list);
 	spin_unlock(&bdi_lock);
 
@@ -487,6 +510,7 @@ static void bdi_add_to_pending(struct rcu_head *head)
 	 * We are now on the pending list, wake up bdi_forker_task()
 	 * to finish the job and add us back to the active bdi_list
 	 */
+	/* 唤醒forker线程 */
 	wake_up_process(default_backing_dev_info.wb.task);
 }
 
@@ -511,6 +535,7 @@ void static bdi_add_default_flusher_task(struct backing_dev_info *bdi)
 	 * bdi_add_default_flusher_task() occured, further additions will block
 	 * waiting for previous additions to finish.
 	 */
+	/* 没有pending的标志 */
 	if (!test_and_set_bit(BDI_pending, &bdi->state)) {
 		list_del_rcu(&bdi->bdi_list);
 
@@ -554,6 +579,7 @@ int bdi_register(struct backing_dev_info *bdi, struct device *parent,
 	}
 
 	spin_lock_bh(&bdi_lock);
+	/* 加入全局的bdi_list */
 	list_add_tail_rcu(&bdi->bdi_list, &bdi_list);
 	spin_unlock_bh(&bdi_lock);
 
@@ -565,6 +591,7 @@ int bdi_register(struct backing_dev_info *bdi, struct device *parent,
 	 * on-demand when they need it.
 	 */
 	if (bdi_cap_flush_forker(bdi)) {
+		/* 给default_backing_dev_info的wb创建回写线程,这个线程主要用作fork其他flusher线程 */
 		struct bdi_writeback *wb = &bdi->wb;
 
 		wb->task = kthread_run(bdi_forker_task, wb, "bdi-%s",
@@ -674,6 +701,7 @@ int bdi_init(struct backing_dev_info *bdi)
 	 * Just one thread support for now, hard code mask and count
 	 */
 	bdi->wb_mask = 1;
+	/* 一个bdi只支持1个回写线程 */
 	bdi->wb_cnt = 1;
 
 	for (i = 0; i < NR_BDI_STAT_ITEMS; i++) {

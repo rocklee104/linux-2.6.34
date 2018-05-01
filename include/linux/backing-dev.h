@@ -44,16 +44,25 @@ enum bdi_stat_item {
 #define BDI_STAT_BATCH (8*(1+ilog2(nr_cpu_ids)))
 
 struct bdi_writeback {
+	/* 链表成员,链表头是backing_dev_info->wb_list */
 	struct list_head list;			/* hangs off the bdi */
 
 	struct backing_dev_info *bdi;		/* our parent bdi */
+	/*
+	 * 每个BDI可以启动的最大回写线程数,即可关联的bdi_writeback数为32.这个数表示当前writeback在bdi中的index,
+	 * 由于当前每个bdi只支持1个writeback线程.所以这个成员恒为0 */
 	unsigned int nr;
 
+	/* 上次冲刷旧数据的时间,单位是jiffies */
 	unsigned long last_old_flush;		/* last old data flush */
 
+	/* 回写线程 */
 	struct task_struct	*task;		/* writeback task */
+	/* dirty的inode第一次变dirty被连入这个链表 */
 	struct list_head	b_dirty;	/* dirty inodes */
+	/* inode被调度回写时,放入这个链表 */
 	struct list_head	b_io;		/* parked for writeback */
+	/* 防止一次性完整回写大文件inode导致其他inode饥饿 */
 	struct list_head	b_more_io;	/* parked for more writeback */
 };
 
@@ -63,8 +72,10 @@ struct backing_dev_info {
 	unsigned long ra_pages;	/* max readahead in PAGE_CACHE_SIZE units */
 	unsigned long state;	/* Always use atomic bitops on this */
 	unsigned int capabilities; /* Device capabilities */
+	/* 判断bdi是否拥塞 */
 	congested_fn *congested_fn; /* Function pointer if device is md/dm */
 	void *congested_data;	/* Pointer to aux data for congested func */
+	/* 泄流的方法 */
 	void (*unplug_io_fn)(struct backing_dev_info *, struct page *);
 	void *unplug_io_data;
 
@@ -75,15 +86,21 @@ struct backing_dev_info {
 	struct prop_local_percpu completions;
 	int dirty_exceeded;
 
+	/* 脏的最小门限(百分比) */
 	unsigned int min_ratio;
+	/* 脏的最大门限(百分比) */
 	unsigned int max_ratio, max_prop_frac;
 
+	/* 默认回写线程 */
 	struct bdi_writeback wb;  /* default writeback info for this bdi */
 	spinlock_t wb_lock;	  /* protects update side of wb_list */
+	/* 这个BDI的回写线程链表的头部 */
 	struct list_head wb_list; /* the flusher threads hanging off this bdi */
 	unsigned long wb_mask;	  /* bitmask of registered tasks */
+	/* 已经注册的线程数目,目前只支持1 */
 	unsigned int wb_cnt;	  /* number of registered tasks */
 
+	/* 冲刷任务的链表头 */
 	struct list_head work_list;
 
 	struct device *dev;
@@ -307,6 +324,7 @@ static inline bool bdi_cap_swap_backed(struct backing_dev_info *bdi)
 	return bdi->capabilities & BDI_CAP_SWAP_BACKED;
 }
 
+/* 只有default_backing_dev_info才有孵化其他flusher的能力 */
 static inline bool bdi_cap_flush_forker(struct backing_dev_info *bdi)
 {
 	return bdi == &default_backing_dev_info;

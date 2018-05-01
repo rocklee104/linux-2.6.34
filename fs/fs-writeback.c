@@ -39,11 +39,20 @@ int nr_pdflush_threads;
  * Passed into wb_writeback(), essentially a subset of writeback_control
  */
 struct wb_writeback_args {
+	/* 要执行回写的页面数 */
 	long nr_pages;
 	struct super_block *sb;
+	/* WB_SYNC_NONE不要等到 */
 	enum writeback_sync_modes sync_mode;
+	/*
+	 * 如果为1,表示kupdate回写.即将超过特定驻留时间的脏页回写磁盘.
+	 * 当脏页在内存中驻留时间超过一定的阈值时,内核必须将超时的脏页回写磁盘,
+	 * 以确保脏页不会无限期的驻留内存.
+	*/
 	int for_kupdate:1;
+	/* 如果为1,表示不受 range_start和range_end的范围限制,在地址空间内循环查找可以回收的页面 */
 	int range_cyclic:1;
+	/* 如果为1,表示后台回写.后台回写用于释放内存目的.如果系统脏页总数下降到脏门限以下,结束回写 */
 	int for_background:1;
 };
 
@@ -51,14 +60,17 @@ struct wb_writeback_args {
  * Work items for the bdi_writeback threads
  */
 struct bdi_work {
+	/* 链接到bdi中的工作任务,链表头是backing_dev_info->work_list */
 	struct list_head list;		/* pending work list */
 	struct rcu_head rcu_head;	/* for RCU free/clear of work */
-
+	/* 已经见过这个任务的线程,这是一个位图.如果某位为1,表示对应编号的bdi_writeback已经见过这个任务 */
 	unsigned long seen;		/* threads that have seen this work */
+	/* 一个任务可以被多个进程处理,这个域记录了还在处理这个任务的线程数 */
 	atomic_t pending;		/* number of threads still to do work */
 
 	struct wb_writeback_args args;	/* writeback arguments */
 
+	/* WS_ONSTACK表示任务在栈上, WS_USED表示任务在使用中 */
 	unsigned long state;		/* flag bits, see WS_* */
 };
 
@@ -827,6 +839,7 @@ static long wb_writeback(struct bdi_writeback *wb,
  * completion on either receiving the work (WB_SYNC_NONE) or after
  * it is done (WB_SYNC_ALL).
  */
+/* 返回下一个还没有被这个wb seen的work */
 static struct bdi_work *get_next_work_item(struct backing_dev_info *bdi,
 					   struct bdi_writeback *wb)
 {
