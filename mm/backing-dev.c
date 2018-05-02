@@ -306,7 +306,7 @@ static int bdi_start_fn(void *ptr)
 	spin_lock_bh(&bdi_lock);
 	/*
 	 * 放入活动链表的原因:
-	 * 1. 一旦冲刷任务完成,在forker线程中就会帮其创建flusher线程.
+	 * 1. 一旦冲刷任务完成,如果还有新的冲刷任务来,在forker线程中就会帮其创建flusher线程.
 	 * 2. 冲刷任务还在执行,forker线程扫描活动bdi,就会跳过这个bdi
 	 */
 	list_add_rcu(&bdi->bdi_list, &bdi_list);

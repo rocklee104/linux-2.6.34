@@ -153,6 +153,7 @@ static void wb_clear_pending(struct bdi_writeback *wb, struct bdi_work *work)
 	 * drop our reference. If this is the last ref, delete and free it
 	 */
 	if (atomic_dec_and_test(&work->pending)) {
+		/* 一个work可能被多个wb处理,如果这是最后一个ref,就把work删除 */
 		struct backing_dev_info *bdi = wb->bdi;
 
 		spin_lock(&bdi->wb_lock);
@@ -165,6 +166,7 @@ static void wb_clear_pending(struct bdi_writeback *wb, struct bdi_work *work)
 
 static void bdi_queue_work(struct backing_dev_info *bdi, struct bdi_work *work)
 {
+	/* bdi->wb_mask初始化的时候被设置为1,表示只支持一个wb */
 	work->seen = bdi->wb_mask;
 	BUG_ON(!work->seen);
 	atomic_set(&work->pending, bdi->wb_cnt);
@@ -848,8 +850,10 @@ static struct bdi_work *get_next_work_item(struct backing_dev_info *bdi,
 	rcu_read_lock();
 
 	list_for_each_entry_rcu(work, &bdi->work_list, list) {
+		/* 跳过那些不属于本wb处理的work */
 		if (!test_bit(wb->nr, &work->seen))
 			continue;
+		/* 当前wb需要处理这个work */
 		clear_bit(wb->nr, &work->seen);
 
 		ret = work;
@@ -867,10 +871,12 @@ static long wb_check_old_data_flush(struct bdi_writeback *wb)
 
 	expired = wb->last_old_flush +
 			msecs_to_jiffies(dirty_writeback_interval * 10);
+	/* 还没超时,就直接返回 */
 	if (time_before(jiffies, expired))
 		return 0;
 
 	wb->last_old_flush = jiffies;
+	/* 文件页+buffer. 假设每一个文件对应的磁盘inode占用一个page */
 	nr_pages = global_page_state(NR_FILE_DIRTY) +
 			global_page_state(NR_UNSTABLE_NFS) +
 			(inodes_stat.nr_inodes - inodes_stat.nr_unused);
@@ -898,6 +904,7 @@ long wb_do_writeback(struct bdi_writeback *wb, int force_wait)
 	struct bdi_work *work;
 	long wrote = 0;
 
+	/* 显式冲刷任务:从work_list上获取当前wb可以处理的work */
 	while ((work = get_next_work_item(bdi, wb)) != NULL) {
 		struct wb_writeback_args args = work->args;
 
@@ -911,6 +918,7 @@ long wb_do_writeback(struct bdi_writeback *wb, int force_wait)
 		 * If this isn't a data integrity operation, just notify
 		 * that we have seen this work and we are now starting it.
 		 */
+		/* 不需要同步等 */
 		if (args.sync_mode == WB_SYNC_NONE)
 			wb_clear_pending(wb, work);
 
@@ -927,8 +935,10 @@ long wb_do_writeback(struct bdi_writeback *wb, int force_wait)
 	/*
 	 * Check for periodic writeback, kupdated() style
 	 */
+	/* 隐式冲刷任务 */
 	wrote += wb_check_old_data_flush(wb);
 
+	/* 显式和隐式冲刷的页面总数返回给调用者 */
 	return wrote;
 }
 
@@ -955,11 +965,13 @@ int bdi_writeback_task(struct bdi_writeback *wb)
 			 * see dirty data again later, the task will get
 			 * recreated automatically.
 			 */
+			/* 如果写完以后5min内没有任何活动,或者压根就没写(也需要等待5min),就退出 */
 			max_idle = max(5UL * 60 * HZ, wait_jiffies);
 			if (time_after(jiffies, max_idle + last_active))
 				break;
 		}
 
+		/* 不管写还是没写,需要等待50s */
 		wait_jiffies = msecs_to_jiffies(dirty_writeback_interval * 10);
 		schedule_timeout_interruptible(wait_jiffies);
 		try_to_freeze();

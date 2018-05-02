@@ -88,6 +88,7 @@ unsigned long vm_dirty_bytes;
 /*
  * The interval between `kupdate'-style writebacks
  */
+/* 5s */
 unsigned int dirty_writeback_interval = 5 * 100; /* centiseconds */
 
 /*
