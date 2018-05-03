@@ -58,7 +58,7 @@ struct bdi_writeback {
 
 	/* 回写线程 */
 	struct task_struct	*task;		/* writeback task */
-	/* dirty的inode第一次变dirty被连入这个链表 */
+	/* dirty的inode第一次变dirty被连入这个链表,最靠近链表头的inode是最近才dirty的 */
 	struct list_head	b_dirty;	/* dirty inodes */
 	/* inode被调度回写时,放入这个链表 */
 	struct list_head	b_io;		/* parked for writeback */

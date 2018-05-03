@@ -1630,8 +1630,14 @@ struct super_operations {
  *
  * Q: What is the difference between I_WILL_FREE and I_FREEING?
  */
+/* inode是脏的,但是其数据干净 */
 #define I_DIRTY_SYNC		1
+/*
+ * fdatasync一般只同步文件数据,必要的时候才会同步inode metadata.
+ * 这个必要性就是通过I_DIRTY_DATASYNC标记的.
+ */
 #define I_DIRTY_DATASYNC	2
+/* 文件数据dirty,但是inode本身可能干净 */
 #define I_DIRTY_PAGES		4
 #define __I_NEW			3
 #define I_NEW			(1 << __I_NEW)
