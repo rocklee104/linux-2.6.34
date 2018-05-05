@@ -294,6 +294,7 @@ int filemap_fdatawait_range(struct address_space *mapping, loff_t start_byte,
 			if (page->index > end)
 				continue;
 
+			/* 等待PG_Writeback被清除 */
 			wait_on_page_writeback(page);
 			if (PageError(page))
 				ret = -EIO;
@@ -369,6 +370,7 @@ int filemap_write_and_wait_range(struct address_space *mapping,
 	int err = 0;
 
 	if (mapping->nrpages) {
+		/* 同步写入 */
 		err = __filemap_fdatawrite_range(mapping, lstart, lend,
 						 WB_SYNC_ALL);
 		/* See comment of filemap_write_and_wait() */

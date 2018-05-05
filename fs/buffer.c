@@ -366,6 +366,7 @@ still_busy:
  * Completion handler for block_write_full_page() - pages which are unlocked
  * during I/O, and which have PageWriteback cleared upon I/O completion.
  */
+/* submit_bh完成后的回调函数 */
 void end_buffer_async_write(struct buffer_head *bh, int uptodate)
 {
 	char b[BDEVNAME_SIZE];
@@ -374,10 +375,12 @@ void end_buffer_async_write(struct buffer_head *bh, int uptodate)
 	struct buffer_head *tmp;
 	struct page *page;
 
+	/* 一定会有BH_Async_Write标志 */
 	BUG_ON(!buffer_async_write(bh));
 
 	page = bh->b_page;
 	if (uptodate) {
+		/* submit_bh完成成功后会设置buffer uptodate */
 		set_buffer_uptodate(bh);
 	} else {
 		if (!quiet_error(bh)) {
@@ -387,6 +390,7 @@ void end_buffer_async_write(struct buffer_head *bh, int uptodate)
 			       bdevname(bh->b_bdev, b));
 		}
 		set_bit(AS_EIO, &page->mapping->flags);
+		/* 如果写失败,设置BH_Write_EIO标志 */
 		set_buffer_write_io_error(bh);
 		clear_buffer_uptodate(bh);
 		SetPageError(page);
@@ -396,12 +400,15 @@ void end_buffer_async_write(struct buffer_head *bh, int uptodate)
 	local_irq_save(flags);
 	bit_spin_lock(BH_Uptodate_Lock, &first->b_state);
 
+	/* 清除BH_Async_Write标志,解锁bh */
 	clear_buffer_async_write(bh);
 	unlock_buffer(bh);
 	tmp = bh->b_this_page;
 	while (tmp != bh) {
+		/* 如果bh依然有BH_Async_Write,表示这个buffer一定是上了锁的 */
 		if (buffer_async_write(tmp)) {
 			BUG_ON(!buffer_locked(tmp));
+			/* page中的buffer并没有完全写完 */
 			goto still_busy;
 		}
 		tmp = tmp->b_this_page;
@@ -1646,6 +1653,7 @@ static int __block_write_full_page(struct inode *inode, struct page *page,
 	int write_op = (wbc->sync_mode == WB_SYNC_ALL ?
 			WRITE_SYNC_PLUG : WRITE);
 
+	/* 回写过程中,page一定要lock住 */
 	BUG_ON(!PageLocked(page));
 
 	last_block = (i_size_read(inode) - 1) >> inode->i_blkbits;
@@ -1673,8 +1681,10 @@ static int __block_write_full_page(struct inode *inode, struct page *page,
 	 * Get all the dirty buffers mapped to disk addresses and
 	 * handle any aliases from the underlying blockdev's mapping.
 	 */
+	/* 循环1:将所有的dirty buffer建立映射 */
 	do {
 		if (block > last_block) {
+			/* 如果缓冲区的块号超过了文件最后的块号,这个块缓冲区必定被调用者做过清0处理. */
 			/*
 			 * mapped buffers outside i_size will occur, because
 			 * this page can be outside i_size when there is a
@@ -1687,6 +1697,7 @@ static int __block_write_full_page(struct inode *inode, struct page *page,
 			set_buffer_uptodate(bh);
 		} else if ((!buffer_mapped(bh) || buffer_delay(bh)) &&
 			   buffer_dirty(bh)) {
+			/* 如果buffer没有map,重新映射buffer */
 			WARN_ON(bh->b_size != blocksize);
 			err = get_block(inode, block, bh, 1);
 			if (err)
@@ -1703,6 +1714,7 @@ static int __block_write_full_page(struct inode *inode, struct page *page,
 		block++;
 	} while (bh != head);
 
+	/* 循环2:锁住buffer,清除dirty标志,给予submit_bh的回调函数 */
 	do {
 		if (!buffer_mapped(bh))
 			continue;
@@ -1714,12 +1726,15 @@ static int __block_write_full_page(struct inode *inode, struct page *page,
 		 * higher-level throttling.
 		 */
 		if (wbc->sync_mode != WB_SYNC_NONE || !wbc->nonblocking) {
+			/* 当需要阻塞去读取数据的时候,不惜等待去lock buffer */
 			lock_buffer(bh);
 		} else if (!trylock_buffer(bh)) {
+			/* 非阻塞,并且没有锁住buffer,将这个page标记为dirty */
 			redirty_page_for_writepage(wbc, page);
 			continue;
 		}
 		if (test_clear_buffer_dirty(bh)) {
+			/* 如果之前page是dirty,清除dirty标志,给予完成submit_bh的回调函数,设置async的标志 */
 			mark_buffer_async_write_endio(bh, handler);
 		} else {
 			unlock_buffer(bh);
@@ -1730,9 +1745,11 @@ static int __block_write_full_page(struct inode *inode, struct page *page,
 	 * The page and its buffers are protected by PageWriteback(), so we can
 	 * drop the bh refcounts early.
 	 */
+	/* 设置回写标志 */
 	BUG_ON(PageWriteback(page));
 	set_page_writeback(page);
 
+	/* 循环3:提交buffer */
 	do {
 		struct buffer_head *next = bh->b_this_page;
 		if (buffer_async_write(bh)) {
@@ -1746,6 +1763,7 @@ static int __block_write_full_page(struct inode *inode, struct page *page,
 	err = 0;
 done:
 	if (nr_underway == 0) {
+	/* page是dirty的,但是buffer是干净的 */
 		/*
 		 * The page was marked dirty, but the buffers were
 		 * clean.  Someone wrote them back by hand with
@@ -1767,6 +1785,7 @@ recover:
 	 * exposing stale data.
 	 * The page is currently locked and not marked for writeback
 	 */
+	/* 如果get_block发生错误,在page中已经map的部分buffer需要回写 */
 	bh = head;
 	/* Recovery: lock and submit the mapped buffers */
 	do {
@@ -2874,12 +2893,17 @@ int block_write_full_page_endio(struct page *page, get_block_t *get_block,
 	unsigned offset;
 
 	/* Is the page fully inside i_size? */
+	/* 非文件末尾的page一定能完整写入 */
 	if (page->index < end_index)
 		return __block_write_full_page(inode, page, get_block, wbc,
 					       handler);
 
 	/* Is the page fully outside i_size? (truncate in progress) */
 	offset = i_size & (PAGE_CACHE_SIZE-1);
+	/*
+	 * 如果写入的page超过文件大小，或者文件以page对齐了,直接返回
+	 *(以page对齐的文件在上一次已经写入完毕)
+	 */
 	if (page->index >= end_index+1 || !offset) {
 		/*
 		 * The page may have dirty, unmapped buffers.  For example,
@@ -2898,6 +2922,7 @@ int block_write_full_page_endio(struct page *page, get_block_t *get_block,
 	 * the  page size, the remaining memory is zeroed when mapped, and
 	 * writes to that region are not written out to the file."
 	 */
+	/* 在page中被全部填充0的buffer,在磁盘上没有对应的block(unmapped),实际上不会回写 */
 	zero_user_segment(page, offset, PAGE_CACHE_SIZE);
 	return __block_write_full_page(inode, page, get_block, wbc, handler);
 }

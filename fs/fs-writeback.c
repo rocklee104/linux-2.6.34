@@ -221,6 +221,7 @@ static void bdi_alloc_queue_work(struct backing_dev_info *bdi,
 	} else {
 		struct bdi_writeback *wb = &bdi->wb;
 
+		/* 有work加入,唤醒flusher */
 		if (wb->task)
 			wake_up_process(wb->task);
 	}
@@ -239,6 +240,7 @@ static void bdi_alloc_queue_work(struct backing_dev_info *bdi,
 static void bdi_sync_writeback(struct backing_dev_info *bdi,
 			       struct super_block *sb)
 {
+	/* 回写属于给定sb的inode的所有页面,不需要回绕 */
 	struct wb_writeback_args args = {
 		.sb		= sb,
 		.sync_mode	= WB_SYNC_ALL,
@@ -251,6 +253,7 @@ static void bdi_sync_writeback(struct backing_dev_info *bdi,
 	work.state |= WS_ONSTACK;
 
 	bdi_queue_work(bdi, &work);
+	/* 回写任务调度后才能继续向下走 */
 	bdi_wait_on_work_clear(&work);
 }
 
@@ -280,6 +283,7 @@ void bdi_start_writeback(struct backing_dev_info *bdi, struct super_block *sb,
 	 * We treat @nr_pages=0 as the special case to do background writeback,
 	 * ie. to sync pages until the background dirty threshold is reached.
 	 */
+	/* 当nr_pages == 0的时候,后台回写最大数量的page */
 	if (!nr_pages) {
 		args.nr_pages = LONG_MAX;
 		args.for_background = 1;
@@ -506,12 +510,13 @@ writeback_single_inode(struct inode *inode, struct writeback_control *wbc)
 
 	/* Don't write the inode if only I_DIRTY_PAGES was set */
 	if (dirty & (I_DIRTY_SYNC | I_DIRTY_DATASYNC)) {
-		/* 需要更新元数据 */
+		/* 需要更新元数据,如果设置了I_DIRTY_PAGES,就不需要回写inode本身 */
 		int err = write_inode(inode, wbc);
 		if (ret == 0)
 			ret = err;
 	}
 
+	/* 回写完成后,inode可能又被弄脏 */
 	spin_lock(&inode_lock);
 	inode->i_state &= ~I_SYNC;
 	/* 如果inode不是要释放的状态 */
@@ -561,7 +566,7 @@ select_queue:
 					/*
 					 * somehow blocked: retry later
 					 */
-					/* 等待以后重试 */
+					/* 头插dirty队列,等待以后重试 */
 					redirty_tail(inode);
 				}
 			} else {
@@ -579,12 +584,13 @@ select_queue:
 			/*
 			 * The inode is clean, inuse
 			 */
-			/* 有其他地方引用这个inode */
+			/* 干净的inode,有其他地方引用这个inode */
 			list_move(&inode->i_list, &inode_in_use);
 		} else {
 			/*
 			 * The inode is clean, unused
 			 */
+			/* 干净的inode,没有有其他地方引用这个inode */
 			list_move(&inode->i_list, &inode_unused);
 		}
 	}
@@ -1055,6 +1061,7 @@ static void bdi_writeback_all(struct super_block *sb, long nr_pages)
 		if (!bdi_has_dirty_io(bdi))
 			continue;
 
+		/* 如果有脏的inode */
 		bdi_alloc_queue_work(bdi, &args);
 	}
 
@@ -1233,6 +1240,7 @@ static void wait_sb_inodes(struct super_block *sb)
 	 * In which case, the inode may not be on the dirty list, but
 	 * we still have to wait for that writeout.
 	 */
+	/* 遍历sb所有的inode,跳过刚创建或者要被释放的inode,以及地址空间中页面数为0的inode */
 	list_for_each_entry(inode, &sb->s_inodes, i_sb_list) {
 		struct address_space *mapping;
 
@@ -1241,6 +1249,7 @@ static void wait_sb_inodes(struct super_block *sb)
 		mapping = inode->i_mapping;
 		if (mapping->nrpages == 0)
 			continue;
+		/* 防止被其他部分释放 */
 		__iget(inode);
 		spin_unlock(&inode_lock);
 		/*
@@ -1273,6 +1282,7 @@ static void wait_sb_inodes(struct super_block *sb)
  * for IO completion of submitted IO. The number of pages submitted is
  * returned.
  */
+/* 将一个sb上所有的dirty inode回写 */
 void writeback_inodes_sb(struct super_block *sb)
 {
 	unsigned long nr_dirty = global_page_state(NR_FILE_DIRTY);
@@ -1313,6 +1323,7 @@ EXPORT_SYMBOL(writeback_inodes_sb_if_idle);
 void sync_inodes_sb(struct super_block *sb)
 {
 	bdi_sync_writeback(sb->s_bdi, sb);
+	/* 任务被调度,不代表inode已经冲刷到磁盘,所以,这里还需要继续等待回写完成 */
 	wait_sb_inodes(sb);
 }
 EXPORT_SYMBOL(sync_inodes_sb);

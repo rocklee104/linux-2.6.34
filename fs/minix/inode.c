@@ -566,6 +566,7 @@ static int minix_write_inode(struct inode *inode, struct writeback_control *wbc)
 	if (!bh)
 		return -EIO;
 	if (wbc->sync_mode == WB_SYNC_ALL && buffer_dirty(bh)) {
+		/* 同步写入 */
 		sync_dirty_buffer(bh);
 		if (buffer_req(bh) && !buffer_uptodate(bh)) {
 			printk("IO error syncing minix inode [%s:%08lx]\n",

@@ -39,6 +39,7 @@ static int __sync_filesystem(struct super_block *sb, int wait)
 	if (sb->s_qcop && sb->s_qcop->quota_sync)
 		sb->s_qcop->quota_sync(sb, -1, wait);
 
+	/* 执行sync()系统调用的时候,先会执行writeback_inodes_sb,再执行sync_inodes_sb */
 	if (wait)
 		sync_inodes_sb(sb);
 	else
@@ -98,11 +99,13 @@ static void sync_filesystems(int wait)
 
 	mutex_lock(&mutex);		/* Could be down_interruptible */
 	spin_lock(&sb_lock);
+	/* 第一轮遍历只是将所有文件系统的s_need_sync置1 */
 	list_for_each_entry(sb, &super_blocks, s_list)
 		sb->s_need_sync = 1;
 
 restart:
 	list_for_each_entry(sb, &super_blocks, s_list) {
+		/* s_need_sync如果被清零,就跳过这个sb.比如重新被弄脏的sb就会被跳过 */
 		if (!sb->s_need_sync)
 			continue;
 		sb->s_need_sync = 0;
@@ -110,6 +113,7 @@ restart:
 		spin_unlock(&sb_lock);
 
 		down_read(&sb->s_umount);
+		/* 只读文件系统或者没有关联bdi的sb不需要同步sb */
 		if (!(sb->s_flags & MS_RDONLY) && sb->s_root && sb->s_bdi)
 			__sync_filesystem(sb, wait);
 		up_read(&sb->s_umount);
@@ -129,7 +133,9 @@ restart:
  */
 SYSCALL_DEFINE0(sync)
 {
+	/* 唤醒flusher线程,这样可以并行地回写所有队列.0表示回写所有可能的页面 */
 	wakeup_flusher_threads(0);
+	/* 同步所有文件系统 */
 	sync_filesystems(0);
 	sync_filesystems(1);
 	if (unlikely(laptop_mode))
@@ -203,6 +209,7 @@ EXPORT_SYMBOL(file_fsync);
  * only @dentry is set.  This can only happen when the filesystem
  * implements the export_operations API.
  */
+/* 同步一段数据范围和元数据到磁盘的辅助函数 */
 int vfs_fsync_range(struct file *file, struct dentry *dentry, loff_t start,
 		    loff_t end, int datasync)
 {
@@ -219,6 +226,7 @@ int vfs_fsync_range(struct file *file, struct dentry *dentry, loff_t start,
 		mapping = file->f_mapping;
 		fop = file->f_op;
 	} else {
+		/* 对于NFSD,可能传入的file是NULL */
 		mapping = dentry->d_inode->i_mapping;
 		fop = dentry->d_inode->i_fop;
 	}
@@ -228,6 +236,7 @@ int vfs_fsync_range(struct file *file, struct dentry *dentry, loff_t start,
 		goto out;
 	}
 
+	/* 将文件inode地址空间的页面冲刷到磁盘 */
 	ret = filemap_write_and_wait_range(mapping, start, end);
 
 	/*
@@ -235,6 +244,7 @@ int vfs_fsync_range(struct file *file, struct dentry *dentry, loff_t start,
 	 * livelocks in fsync_buffers_list().
 	 */
 	mutex_lock(&mapping->host->i_mutex);
+	/* 调用文件系统文件操作表的fsync函数,冲刷元数据,minixfs采用simple_fsync */
 	err = fop->fsync(file, dentry, datasync);
 	if (!ret)
 		ret = err;

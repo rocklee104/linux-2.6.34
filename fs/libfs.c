@@ -827,12 +827,16 @@ int simple_fsync(struct file *file, struct dentry *dentry, int datasync)
 	int err;
 	int ret;
 
+	/* 将文件使用的间接块冲刷到磁盘 */
 	ret = sync_mapping_buffers(inode->i_mapping);
+	/* 如果元数据没有被修改,直接返回 */
 	if (!(inode->i_state & I_DIRTY))
 		return ret;
+	/* 如果元数据被修改,并且inode没有需要马上回写的metadata,直接返回 */
 	if (datasync && !(inode->i_state & I_DIRTY_DATASYNC))
 		return ret;
 
+	/* 最终调用write_inode */
 	err = sync_inode(inode, &wbc);
 	if (ret == 0)
 		ret = err;

@@ -830,6 +830,7 @@ int write_cache_pages(struct address_space *mapping,
 	pgoff_t index;
 	pgoff_t end;		/* Inclusive */
 	pgoff_t done_index;
+	/* 0的时候,表示需要回绕.1表示不需要回绕 */
 	int cycled;
 	int range_whole = 0;
 	long nr_to_write = wbc->nr_to_write;
@@ -838,6 +839,11 @@ int write_cache_pages(struct address_space *mapping,
 	if (wbc->range_cyclic) {
 		writeback_index = mapping->writeback_index; /* prev offset */
 		index = writeback_index;
+		/*
+		 * 1.如果writeback_index == 0,表示本次冲刷只需要一段即可,设置cycled为1.
+		 * 2.如果writeback_index不等于0,则本次冲刷要分两次,现将cycled设置为0,从writeback_index到最后.
+		 *   在它冲刷完成后,将cycled设置成1,从0到writeback_index-1执行冲刷.
+		 */
 		if (index == 0)
 			cycled = 1;
 		else
@@ -855,9 +861,11 @@ retry:
 	while (!done && (index <= end)) {
 		int i;
 
+		/* 在地址空间中查找设置了PAGECACHE_TAG_DIRTY的页面 */
 		nr_pages = pagevec_lookup_tag(&pvec, mapping, &index,
 			      PAGECACHE_TAG_DIRTY,
 			      min(end - index, (pgoff_t)PAGEVEC_SIZE-1) + 1);
+		/* 没有找到合适的页面 */
 		if (nr_pages == 0)
 			break;
 
@@ -892,28 +900,34 @@ retry:
 			 * even if there is now a new, dirty page at the same
 			 * pagecache address.
 			 */
+			/* 加锁的过程中,可能有别的进程做过改动,需要判断一下,这是常规工作 */
 			if (unlikely(page->mapping != mapping)) {
 continue_unlock:
 				unlock_page(page);
 				continue;
 			}
 
+			/* 如果已经有其他进程帮忙回写这个page,那么直接跳过 */
 			if (!PageDirty(page)) {
 				/* someone wrote it for us */
 				goto continue_unlock;
 			}
 
+			/* 如果页面正在回写,WB_SYNC_ALL如果设置,就需要等待这个回写完成 */
 			if (PageWriteback(page)) {
 				if (wbc->sync_mode != WB_SYNC_NONE)
 					wait_on_page_writeback(page);
 				else
+					/* WB_SYNC_NONE不需要等待,跳过这个页面 */
 					goto continue_unlock;
 			}
 
 			BUG_ON(PageWriteback(page));
+			/* 如果之前就是clean的 */
 			if (!clear_page_dirty_for_io(page))
 				goto continue_unlock;
 
+			/* 将dirty的page回写 */
 			ret = (*writepage)(page, wbc, data);
 			if (unlikely(ret)) {
 				if (ret == AOP_WRITEPAGE_ACTIVATE) {
@@ -929,12 +943,14 @@ continue_unlock:
 					 * not be suitable for data integrity
 					 * writeout).
 					 */
+					/* 如果出错 */
 					done = 1;
 					break;
 				}
  			}
 
 			if (nr_to_write > 0) {
+				/* 需要写入的页面数量减1 */
 				nr_to_write--;
 				if (nr_to_write == 0 &&
 				    wbc->sync_mode == WB_SYNC_NONE) {
@@ -956,6 +972,7 @@ continue_unlock:
 		pagevec_release(&pvec);
 		cond_resched();
 	}
+	/* 回绕的第一段完成,需要处理回绕的第二段 */
 	if (!cycled && !done) {
 		/*
 		 * range_cyclic:
@@ -967,9 +984,12 @@ continue_unlock:
 		end = writeback_index - 1;
 		goto retry;
 	}
+	/* 有些文件系统有自己更新计数的方式,就会设置no_nrwrite_index_update */
 	if (!wbc->no_nrwrite_index_update) {
 		if (wbc->range_cyclic || (range_whole && nr_to_write > 0))
+			/* 下次writeback的起始index */
 			mapping->writeback_index = done_index;
+		/* 还需要写入多少page */
 		wbc->nr_to_write = nr_to_write;
 	}
 
@@ -1079,6 +1099,7 @@ int __set_page_dirty_no_writeback(struct page *page)
 void account_page_dirtied(struct page *page, struct address_space *mapping)
 {
 	if (mapping_cap_account_dirty(mapping)) {
+		/* 文件脏页计数增加 */
 		__inc_zone_page_state(page, NR_FILE_DIRTY);
 		__inc_bdi_stat(mapping->backing_dev_info, BDI_RECLAIMABLE);
 		task_dirty_inc(current);
@@ -1101,9 +1122,14 @@ void account_page_dirtied(struct page *page, struct address_space *mapping)
  * We take care to handle the case where the page was truncated from the
  * mapping by re-checking page_mapping() inside tree_lock.
  */
+/*
+ * 如果之前是dirty的,就返回0.
+ * 如果之前是clean的,将page标记为dirty,返回1
+ */
 int __set_page_dirty_nobuffers(struct page *page)
 {
 	if (!TestSetPageDirty(page)) {
+		/* 如果之前page是clean的 */
 		struct address_space *mapping = page_mapping(page);
 		struct address_space *mapping2;
 
@@ -1116,12 +1142,14 @@ int __set_page_dirty_nobuffers(struct page *page)
 			BUG_ON(mapping2 != mapping);
 			WARN_ON_ONCE(!PagePrivate(page) && !PageUptodate(page));
 			account_page_dirtied(page, mapping);
+			/* 将地址空间中这个page标记为脏 */
 			radix_tree_tag_set(&mapping->page_tree,
 				page_index(page), PAGECACHE_TAG_DIRTY);
 		}
 		spin_unlock_irq(&mapping->tree_lock);
 		if (mapping->host) {
 			/* !PageAnon && !swapper_space */
+			/* 也需要将对应的inode标记为dirty放回dirty队列 */
 			__mark_inode_dirty(mapping->host, I_DIRTY_PAGES);
 		}
 		return 1;
@@ -1135,8 +1163,10 @@ EXPORT_SYMBOL(__set_page_dirty_nobuffers);
  * page for some reason, it should redirty the locked page via
  * redirty_page_for_writepage() and it should then unlock the page and return 0
  */
+/* 如果某些原因,不希望写入这个page.这个page需要重新dirty,并且lock住 */
 int redirty_page_for_writepage(struct writeback_control *wbc, struct page *page)
 {
+	/* 回写的时候,跳过这个page */
 	wbc->pages_skipped++;
 	return __set_page_dirty_nobuffers(page);
 }
@@ -1208,6 +1238,7 @@ EXPORT_SYMBOL(set_page_dirty_lock);
  * This incoherency between the page's dirty flag and radix-tree tag is
  * unfortunate, but it only exists while the page is locked.
  */
+/* 之前是dirty的,就返回1.否则返回0 */
 int clear_page_dirty_for_io(struct page *page)
 {
 	struct address_space *mapping = page_mapping(page);
@@ -1253,6 +1284,7 @@ int clear_page_dirty_for_io(struct page *page)
 		 * the desired exclusion. See mm/memory.c:do_wp_page()
 		 * for more comments.
 		 */
+		/* 如果之前是dirty的,就需要减少dirty的count计数 */
 		if (TestClearPageDirty(page)) {
 			dec_zone_page_state(page, NR_FILE_DIRTY);
 			dec_bdi_stat(mapping->backing_dev_info,
