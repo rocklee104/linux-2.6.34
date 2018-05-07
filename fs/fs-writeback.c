@@ -1129,6 +1129,10 @@ static noinline void block_dump___mark_inode_dirty(struct inode *inode)
  * page->mapping->host, so the page-dirtying time is recorded in the internal
  * blockdev inode.
  */
+/*
+ * 在dirty之前必须保证inode已经加入hash table.
+ * flag可能是I_DIRTY_SYNC,I_DIRTY_DATASYNC,I_DIRTY_PAGES
+ */
 void __mark_inode_dirty(struct inode *inode, int flags)
 {
 	struct super_block *sb = inode->i_sb;
@@ -1166,6 +1170,7 @@ void __mark_inode_dirty(struct inode *inode, int flags)
 		 * The unlocker will place the inode on the appropriate
 		 * superblock list, based upon its state.
 		 */
+		/* inode正在被回写 */
 		if (inode->i_state & I_SYNC)
 			goto out;
 
@@ -1177,6 +1182,7 @@ void __mark_inode_dirty(struct inode *inode, int flags)
 			if (hlist_unhashed(&inode->i_hash))
 				goto out;
 		}
+		/* 如果inode即将被销毁 */
 		if (inode->i_state & (I_FREEING|I_CLEAR))
 			goto out;
 
@@ -1196,6 +1202,7 @@ void __mark_inode_dirty(struct inode *inode, int flags)
 			}
 
 			inode->dirtied_when = jiffies;
+			/* inode第一次被弄脏,放到其对应的bdi->wb的b_dirty队列上 */
 			list_move(&inode->i_list, &wb->b_dirty);
 		}
 	}
