@@ -59,6 +59,7 @@ struct wb_writeback_args {
 /*
  * Work items for the bdi_writeback threads
  */
+/* 显式的wb采用bdi_work的方式提交 */
 struct bdi_work {
 	/* 链接到bdi中的工作任务,链表头是backing_dev_info->work_list */
 	struct list_head list;		/* pending work list */
@@ -369,6 +370,7 @@ static void move_expired_inodes(struct list_head *delaying_queue,
 	while (!list_empty(delaying_queue)) {
 		/* inode是以dirty的时间从早到晚排列的,取下最早的inode */
 		inode = list_entry(delaying_queue->prev, struct inode, i_list);
+		/* 如果inode弄脏的时间是在older_than_this之后 */
 		if (older_than_this &&
 		    inode_dirtied_after(inode, *older_than_this))
 			break;
@@ -404,7 +406,7 @@ static void move_expired_inodes(struct list_head *delaying_queue,
  */
 static void queue_io(struct bdi_writeback *wb, unsigned long *older_than_this)
 {
-	/* 将b_more_io链表上所有成员移动到b_io最后 */
+	/* 将b_more_io链表上所有成员移动到b_io最后(最后都是dirty时间最久的) */
 	list_splice_init(&wb->b_more_io, wb->b_io.prev);
 	/* 将b_dirty中比older_than_this更早脏的inode放入b_io */
 	move_expired_inodes(&wb->b_dirty, &wb->b_io, older_than_this);
@@ -820,7 +822,7 @@ static long wb_writeback(struct bdi_writeback *wb,
 	long wrote = 0;
 	struct inode *inode;
 
-	/* 用于定期更新 */
+	/* 用于定期更新,只会回写older_than_this的inode */
 	if (wbc.for_kupdate) {
 		wbc.older_than_this = &oldest_jif;
 		oldest_jif = jiffies -
@@ -944,6 +946,7 @@ static long wb_check_old_data_flush(struct bdi_writeback *wb)
 			(inodes_stat.nr_inodes - inodes_stat.nr_unused);
 
 	if (nr_pages) {
+		/* 周期性回写,不会指定sb */
 		struct wb_writeback_args args = {
 			.nr_pages	= nr_pages,
 			.sync_mode	= WB_SYNC_NONE,

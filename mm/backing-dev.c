@@ -413,7 +413,7 @@ static int bdi_forker_task(void *ptr)
 		 * Temporary measure, we want to make sure we don't see
 		 * dirty data on the default backing_dev_info
 		 */
-		/* 首先查看当前wb上有没有需要回写的inode或者当前bdi上是否有需要处理的work */
+		/* 检查显式和隐式的回写任务 */
 		if (wb_has_dirty_io(me) || !list_empty(&me->bdi->work_list))
 			wb_do_writeback(me, 0);
 
@@ -431,7 +431,7 @@ static int bdi_forker_task(void *ptr)
 			    !bdi_has_dirty_io(bdi))
 				continue;
 
-			/* 当一个bdi有需要处理的wrok,但是没有对应的flush线程,就将这个bdi加到pending list上 */
+			/* 当一个bdi有需要处理的work,但是没有对应的flush线程,就将这个bdi加到pending list上 */
 			bdi_add_default_flusher_task(bdi);
 		}
 

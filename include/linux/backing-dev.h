@@ -43,6 +43,7 @@ enum bdi_stat_item {
 
 #define BDI_STAT_BATCH (8*(1+ilog2(nr_cpu_ids)))
 
+/* b_dirty/b_io/b_io_more用于隐式wb */
 struct bdi_writeback {
 	/* 链表成员,链表头是backing_dev_info->wb_list */
 	struct list_head list;			/* hangs off the bdi */
